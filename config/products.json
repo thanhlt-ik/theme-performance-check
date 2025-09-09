@@ -1,0 +1,89 @@
+{
+  "products": [
+    {
+      "name": "Blum - Solie",
+      "url": "https://blum-solie.myshopify.com/",
+      "description": "Blum theme - Solie variant"
+    },
+    {
+      "name": "Blum - Celia",
+      "url": "https://blum-celia.myshopify.com/",
+      "description": "Blum theme - Celia variant"
+    },
+    {
+      "name": "Blum - Mondo",
+      "url": "https://blum-mondo.myshopify.com/",
+      "description": "Blum theme - Mondo variant"
+    },
+    {
+      "name": "Blum - Crafts",
+      "url": "https://blum-crafts.myshopify.com/",
+      "description": "Blum theme - Crafts variant"
+    },
+    {
+      "name": "Blum - Fuji",
+      "url": "https://blum-fuji.myshopify.com/",
+      "description": "Blum theme - Fuji variant"
+    },
+    {
+      "name": "Electro - Gizmo",
+      "url": "https://electro-gizmo-demo.myshopify.com/",
+      "description": "Electro theme - Gizmo variant"
+    },
+    {
+      "name": "Electro - Audio",
+      "url": "https://electro-audio-demo.myshopify.com/",
+      "description": "Electro theme - Audio variant"
+    },
+    {
+      "name": "Electro - Surveillance",
+      "url": "https://electro-surveillance-demo.myshopify.com/",
+      "description": "Electro theme - Surveillance variant"
+    },
+    {
+      "name": "Electro - Skatewear",
+      "url": "https://electro-skatewear.myshopify.com/",
+      "description": "Electro theme - Skatewear variant"
+    },
+    {
+      "name": "Shine - Sophisticated",
+      "url": "https://shine-sophisticated.myshopify.com/",
+      "description": "Shine theme - Sophisticated variant"
+    },
+    {
+      "name": "Shine - Energetic",
+      "url": "https://shine-energetic.myshopify.com/",
+      "description": "Shine theme - Energetic variant"
+    },
+    {
+      "name": "Shine - Serene",
+      "url": "https://shine-serene.myshopify.com/",
+      "description": "Shine theme - Serene variant"
+    },
+    {
+      "name": "Normcore - Elementary",
+      "url": "https://normcore-elementary.myshopify.com/",
+      "description": "Normcore theme - Elementary variant"
+    },
+    {
+      "name": "Normcore - Fundamental",
+      "url": "https://normcore-fundamental.myshopify.com/",
+      "description": "Normcore theme - Fundamental variant"
+    },
+    {
+      "name": "Normcore - Subtle",
+      "url": "https://normcore-subtle.myshopify.com/",
+      "description": "Normcore theme - Subtle variant"
+    },
+    {
+      "name": "Normcore - Matte",
+      "url": "https://normcore-matte.myshopify.com/",
+      "description": "Normcore theme - Matte variant"
+    },
+    {
+      "name": "Normcore - Raw",
+      "url": "https://normcore-raw.myshopify.com/",
+      "description": "Normcore theme - Raw variant"
+    }
+  ]
+}

@@ -1,0 +1,86 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("POSTGRES_PRISMA_URL")
+  directUrl = env("POSTGRES_URL_NON_POOLING")
+}
+
+model Product {
+  id           String                   @id @default(cuid())
+  name         String
+  url          String                   @unique
+  description  String?
+  isActive     Boolean                  @default(true)
+  createdAt    DateTime                 @default(now())
+  updatedAt    DateTime                 @updatedAt
+  measurements PerformanceMeasurement[]
+
+  @@map("Product")
+}
+
+model PerformanceMeasurement {
+  id               String     @id @default(cuid())
+  productId        String
+  deviceType       DeviceType
+  measurementDate  DateTime   @default(now())
+  performanceScore Int
+  fcp              Int?
+  lcp              Int?
+  cls              Float?
+  fid              Int?
+  ttfb             Int?
+  speedIndex       Int?
+  tbt              Int?
+  opportunity      Json?
+  diagnostics      Json?
+  createdAt        DateTime   @default(now())
+  updatedAt        DateTime   @updatedAt
+  product          Product    @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  @@index([productId, deviceType, measurementDate])
+  @@index([measurementDate])
+  @@map("PerformanceMeasurement")
+}
+
+model MeasurementJob {
+  id           String     @id @default(cuid())
+  productId    String
+  deviceType   DeviceType
+  status       JobStatus  @default(PENDING)
+  scheduledAt  DateTime
+  startedAt    DateTime?
+  completedAt  DateTime?
+  errorMessage String?
+  retryCount   Int        @default(0)
+  createdAt    DateTime   @default(now())
+  updatedAt    DateTime   @updatedAt
+
+  @@index([status, scheduledAt])
+  @@map("MeasurementJob")
+}
+
+model SystemConfig {
+  id        String   @id @default(cuid())
+  key       String   @unique
+  value     String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("SystemConfig")
+}
+
+enum DeviceType {
+  DESKTOP
+  MOBILE
+}
+
+enum JobStatus {
+  PENDING
+  RUNNING
+  COMPLETED
+  FAILED
+  CANCELLED
+}
