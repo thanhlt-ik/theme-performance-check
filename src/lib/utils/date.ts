@@ -139,3 +139,16 @@ export function isValidDate(date: any): boolean {
 export function getCurrentVietnamDate(): Date {
   return toZonedTime(new Date(), DEFAULT_TIMEZONE);
 }
+
+/**
+ * ISO dateFrom/dateTo bounds for "the last N days", rounded to UTC day
+ * boundaries instead of the current millisecond. Callers that pass these
+ * straight into a SWR key (e.g. measurement trend charts) get a stable key
+ * for the rest of the day instead of a new one on every render.
+ */
+export function dayRangeISO(days: number): { dateFrom: string; dateTo: string } {
+  const now = new Date();
+  const endOfToday = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1));
+  const start = new Date(endOfToday.getTime() - days * 24 * 60 * 60 * 1000);
+  return { dateFrom: start.toISOString(), dateTo: endOfToday.toISOString() };
+}

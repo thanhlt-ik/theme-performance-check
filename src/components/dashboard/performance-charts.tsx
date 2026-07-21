@@ -1,290 +1,221 @@
 'use client';
 
-import { useEffect, useState } from 'react';
-import {
-  LineChart,
-  Line,
-  XAxis,
-  YAxis,
-  CartesianGrid,
-  Tooltip,
-  ResponsiveContainer,
-  Legend
-} from 'recharts';
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
-import { Button } from '@/components/ui/button';
-import { Badge } from '@/components/ui/badge';
-import { Calendar, Monitor, Smartphone } from 'lucide-react';
-import { ChartDataPoint, ProductChartData } from '@/lib/types';
-import { formatShortDate } from '@/lib/utils/date';
+import { useMemo, useState } from 'react';
+import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
+import { ChartDataPoint, PerformanceMeasurement } from '@/lib/types';
+import { formatShortDate, dayRangeISO } from '@/lib/utils/date';
+import { categoricalColor } from '@/lib/utils/chart-palette';
+import { useTheme } from '@/lib/hooks/use-theme';
+import { useMeasurements } from '@/lib/hooks/use-measurements';
+import { RangeToggle } from '@/components/dashboard/range-toggle';
 
-interface ChartFilters {
-  productId: string;
-  days: number;
-  metric: 'performanceScore' | 'fcp' | 'lcp' | 'cls';
+export type DeviceType = 'DESKTOP' | 'MOBILE';
+
+const RANGE_OPTIONS = [
+  { value: 7, label: '7d' },
+  { value: 30, label: '30d' },
+  { value: 90, label: '90d' },
+];
+
+// Caps how many lines render at once in compare mode — matches the size of
+// the validated categorical palette (see chart-palette.ts).
+const MAX_COMPARE_SERIES = 8;
+
+interface CompareProduct {
+  id: string;
+  name: string;
 }
 
-export function PerformanceCharts() {
-  const [chartData, setChartData] = useState<ChartDataPoint[]>([]);
-  const [products, setProducts] = useState<Array<{ id: string; name: string }>>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-  const [filters, setFilters] = useState<ChartFilters>({
-    productId: 'all',
-    days: 30,
-    metric: 'performanceScore'
+interface PerformanceChartsProps {
+  productIds: string[]; // empty = all products, aggregated into one line
+  allProducts: CompareProduct[];
+  device: DeviceType;
+}
+
+export function PerformanceCharts({ productIds, allProducts, device }: PerformanceChartsProps) {
+  const { theme } = useTheme();
+  const [days, setDays] = useState(30);
+
+  const isCompare = productIds.length > 1;
+  const { dateFrom, dateTo } = useMemo(() => dayRangeISO(days), [days]);
+
+  // Single-product selection can be filtered server-side; comparing multiple
+  // products fetches the broader set and groups client-side, same pattern
+  // already used by the Core Web Vitals table.
+  const singleProductId = productIds.length === 1 ? productIds[0] : undefined;
+  const { measurements: rawMeasurements, isLoading: loading, error: fetchError } = useMeasurements({
+    dateFrom,
+    dateTo,
+    limit: 2000,
+    productId: singleProductId,
   });
+  const error = fetchError ? fetchError.message : null;
 
-  useEffect(() => {
-    fetchProducts();
-  }, []);
+  const chartData = useMemo(() => transformMeasurementsToChartData(rawMeasurements), [rawMeasurements]);
 
-  useEffect(() => {
-    if (products.length > 0) {
-      fetchChartData();
-    }
-  }, [filters, products]);
-
-  const fetchProducts = async () => {
-    try {
-      const response = await fetch('/api/products?active=true');
-      if (!response.ok) throw new Error('Failed to fetch products');
-      
-      const data = await response.json();
-      if (data.success) {
-        setProducts(data.data);
-        if (data.data.length > 0) {
-          setFilters(prev => ({ ...prev, productId: data.data[0].id }));
-        }
-      }
-    } catch (err) {
-      console.error('Error fetching products:', err);
-      setError('Failed to load products');
-    }
-  };
-
-  const fetchChartData = async () => {
-    try {
-      setLoading(true);
-      
-      const now = Date.now();
-      const dateFrom = new Date(now - (filters.days * 24 * 60 * 60 * 1000));
-      
-      const params = new URLSearchParams({
-        dateFrom: dateFrom.toISOString(),
-        dateTo: new Date(now).toISOString(),
-        limit: '1000'
-      });
-
-      if (filters.productId !== 'all') {
-        params.append('productId', filters.productId);
-      }
-
-      const response = await fetch(`/api/measurements?${params.toString()}`);
-      if (!response.ok) throw new Error('Failed to fetch measurements');
-      
-      const data = await response.json();
-      if (!data.success) throw new Error('Invalid response');
-
-      // Transform data for charts
-      const transformedData = transformMeasurementsToChartData(data.data);
-      setChartData(transformedData);
-      setError(null);
-    } catch (err) {
-      console.error('Error fetching chart data:', err);
-      setError(err instanceof Error ? err.message : 'Failed to load chart data');
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const transformMeasurementsToChartData = (measurements: any[]): ChartDataPoint[] => {
-    // Group measurements by date and device type
-    const groupedData = measurements.reduce((acc, measurement) => {
+  function transformMeasurementsToChartData(measurements: PerformanceMeasurement[]): ChartDataPoint[] {
+    const grouped = measurements.reduce((acc: Record<string, any>, measurement) => {
       const date = new Date(measurement.measurementDate).toISOString().split('T')[0];
       const key = `${date}-${measurement.deviceType}`;
-      
-      if (!acc[key]) {
-        acc[key] = {
-          date,
-          deviceType: measurement.deviceType,
-          measurements: []
-        };
-      }
-      
+      if (!acc[key]) acc[key] = { date, deviceType: measurement.deviceType, measurements: [] };
       acc[key].measurements.push(measurement);
       return acc;
     }, {});
 
-    // Calculate averages and create chart data points
-    return Object.values(groupedData).map((group: any) => {
-      const measurements = group.measurements;
-      const avgScore = Math.round(
-        measurements.reduce((sum: number, m: any) => sum + m.performanceScore, 0) / measurements.length
-      );
-      
-      return {
+    return Object.values(grouped)
+      .map((group: any) => ({
         date: group.date,
-        performanceScore: avgScore,
-        fcp: Math.round(measurements.reduce((sum: number, m: any) => sum + (m.fcp || 0), 0) / measurements.length),
-        lcp: Math.round(measurements.reduce((sum: number, m: any) => sum + (m.lcp || 0), 0) / measurements.length),
-        cls: Number((measurements.reduce((sum: number, m: any) => sum + (m.cls || 0), 0) / measurements.length).toFixed(3)),
-        deviceType: group.deviceType
-      };
-    }).sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
-  };
-
-  const getMetricConfig = (metric: string) => {
-    switch (metric) {
-      case 'performanceScore':
-        return { label: 'Performance Score', color: '#3b82f6', unit: '', yDomain: [0, 100] };
-      case 'fcp':
-        return { label: 'First Contentful Paint', color: '#10b981', unit: 'ms', yDomain: [0, 'dataMax'] };
-      case 'lcp':
-        return { label: 'Largest Contentful Paint', color: '#f59e0b', unit: 'ms', yDomain: [0, 'dataMax'] };
-      case 'cls':
-        return { label: 'Cumulative Layout Shift', color: '#ef4444', unit: '', yDomain: [0, 'dataMax'] };
-      default:
-        return { label: 'Performance Score', color: '#3b82f6', unit: '', yDomain: [0, 100] };
-    }
-  };
-
-  if (loading) {
-    return (
-      <div className="h-[350px] w-full flex items-center justify-center">
-        <div className="text-muted-foreground">Loading chart data...</div>
-      </div>
-    );
+        performanceScore: Math.round(
+          group.measurements.reduce((sum: number, m: any) => sum + m.performanceScore, 0) / group.measurements.length
+        ),
+        deviceType: group.deviceType,
+      }))
+      .sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
   }
 
-  if (error) {
-    return (
-      <div className="h-[350px] w-full flex items-center justify-center">
-        <div className="text-red-500">Error: {error}</div>
-      </div>
-    );
-  }
+  const deviceData = chartData.filter((d) => d.deviceType === device);
+  const deviceLabel = device === 'DESKTOP' ? 'Desktop' : 'Mobile';
+  const rangeLabel = RANGE_OPTIONS.find((r) => r.value === days)?.label ?? `${days}d`;
 
-  const metricConfig = getMetricConfig(filters.metric);
-  const desktopData = chartData.filter(d => d.deviceType === 'DESKTOP');
-  const mobileData = chartData.filter(d => d.deviceType === 'MOBILE');
+  // Series get a color from their stable position in the full product list —
+  // not selection order — so toggling one product on/off never repaints
+  // the colors of the others already shown.
+  const compareSeries = isCompare
+    ? productIds
+        .map((id) => ({
+          id,
+          name: allProducts.find((p) => p.id === id)?.name ?? id,
+          colorIndex: allProducts.findIndex((p) => p.id === id),
+        }))
+        .sort((a, b) => a.colorIndex - b.colorIndex)
+        .slice(0, MAX_COMPARE_SERIES)
+    : [];
+
+  const compareData = isCompare
+    ? buildCompareData(rawMeasurements, compareSeries.map((s) => s.id), device)
+    : [];
+
+  const singleProductName = productIds.length === 1 ? allProducts.find((p) => p.id === productIds[0])?.name : null;
 
   return (
-    <div className="space-y-4">
-      {/* Filters */}
-      <div className="flex items-center gap-4 flex-wrap">
-        <Select value={filters.productId} onValueChange={(value) => setFilters(prev => ({ ...prev, productId: value }))}>
-          <SelectTrigger className="w-[200px]">
-            <SelectValue placeholder="Select product" />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem value="all">All Products</SelectItem>
-            {products.map((product) => (
-              <SelectItem key={product.id} value={product.id}>
-                {product.name}
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
-
-        <Select value={filters.days.toString()} onValueChange={(value) => setFilters(prev => ({ ...prev, days: parseInt(value) }))}>
-          <SelectTrigger className="w-[120px]">
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem value="7">7 days</SelectItem>
-            <SelectItem value="30">30 days</SelectItem>
-            <SelectItem value="90">90 days</SelectItem>
-          </SelectContent>
-        </Select>
-
-        <Select value={filters.metric} onValueChange={(value: any) => setFilters(prev => ({ ...prev, metric: value }))}>
-          <SelectTrigger className="w-[180px]">
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem value="performanceScore">Performance Score</SelectItem>
-            <SelectItem value="fcp">First Contentful Paint</SelectItem>
-            <SelectItem value="lcp">Largest Contentful Paint</SelectItem>
-            <SelectItem value="cls">Cumulative Layout Shift</SelectItem>
-          </SelectContent>
-        </Select>
-
-        <Button variant="outline" size="sm" onClick={() => fetchChartData()}>
-          <Calendar className="h-4 w-4 mr-2" />
-          Refresh
-        </Button>
+    <div className="flex flex-col gap-3">
+      <div className="flex items-baseline justify-between flex-wrap gap-2">
+        <div className="text-sm font-semibold text-foreground">
+          Trend — {singleProductName ?? deviceLabel} · {rangeLabel}
+        </div>
+        <RangeToggle value={days} options={RANGE_OPTIONS} onChange={setDays} />
       </div>
 
-      {/* Chart */}
-      <div className="h-[300px] w-full">
-        <ResponsiveContainer width="100%" height="100%">
-          <LineChart>
-            <CartesianGrid strokeDasharray="3 3" />
-            <XAxis 
-              dataKey="date" 
-              type="category"
-              allowDuplicatedCategory={false}
+      {loading ? (
+        <div className="h-[220px] w-full rounded bg-muted animate-pulse" />
+      ) : error ? (
+        <div className="h-[220px] w-full flex items-center justify-center text-sm text-sev-poor-foreground">
+          Lỗi: {error}
+        </div>
+      ) : isCompare ? (
+        compareData.length === 0 ? (
+          <div className="h-[220px] w-full flex items-center justify-center text-sm text-muted-foreground">
+            Không có dữ liệu phù hợp bộ lọc.
+          </div>
+        ) : (
+          <>
+            <ResponsiveContainer width="100%" height={220}>
+              <LineChart data={compareData} margin={{ top: 8, right: 8, left: -16, bottom: 0 }}>
+                <CartesianGrid strokeDasharray="3 4" stroke="var(--border)" vertical={false} />
+                <XAxis
+                  dataKey="date"
+                  tickFormatter={(date) => formatShortDate(date)}
+                  tick={{ fontSize: 11, fill: 'var(--text-faint)' }}
+                  axisLine={{ stroke: 'var(--border)' }}
+                  tickLine={false}
+                />
+                <YAxis domain={[0, 100]} tick={{ fontSize: 11, fill: 'var(--text-faint)' }} axisLine={false} tickLine={false} />
+                <Tooltip
+                  labelFormatter={(date) => formatShortDate(date as string)}
+                  contentStyle={{ background: 'var(--card)', border: '1px solid var(--border)', borderRadius: 8, fontSize: 12 }}
+                />
+                {compareSeries.map((s) => (
+                  <Line
+                    key={s.id}
+                    type="monotone"
+                    dataKey={s.id}
+                    name={s.name}
+                    stroke={categoricalColor(s.colorIndex, theme)}
+                    strokeWidth={2}
+                    dot={false}
+                    connectNulls
+                  />
+                ))}
+              </LineChart>
+            </ResponsiveContainer>
+            <div className="flex flex-wrap gap-x-4 gap-y-1.5">
+              {compareSeries.map((s) => (
+                <span key={s.id} className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                  <span
+                    className="h-2 w-2 shrink-0 rounded-full"
+                    style={{ backgroundColor: categoricalColor(s.colorIndex, theme) }}
+                  />
+                  {s.name}
+                </span>
+              ))}
+            </div>
+            {productIds.length > MAX_COMPARE_SERIES && (
+              <div className="text-xs text-muted-foreground">
+                Đang hiển thị {MAX_COMPARE_SERIES}/{productIds.length} theme trên biểu đồ — thu hẹp lựa chọn để xem đủ.
+              </div>
+            )}
+          </>
+        )
+      ) : deviceData.length === 0 ? (
+        <div className="h-[220px] w-full flex items-center justify-center text-sm text-muted-foreground">
+          Không có dữ liệu phù hợp bộ lọc.
+        </div>
+      ) : (
+        <ResponsiveContainer width="100%" height={220}>
+          <LineChart data={deviceData} margin={{ top: 8, right: 8, left: -16, bottom: 0 }}>
+            <CartesianGrid strokeDasharray="3 4" stroke="var(--border)" vertical={false} />
+            <XAxis
+              dataKey="date"
               tickFormatter={(date) => formatShortDate(date)}
+              tick={{ fontSize: 11, fill: 'var(--text-faint)' }}
+              axisLine={{ stroke: 'var(--border)' }}
+              tickLine={false}
             />
-            <YAxis 
-              domain={metricConfig.yDomain as any}
-              label={{ value: `${metricConfig.label} (${metricConfig.unit})`, angle: -90, position: 'insideLeft' }}
+            <YAxis domain={[0, 100]} tick={{ fontSize: 11, fill: 'var(--text-faint)' }} axisLine={false} tickLine={false} />
+            <Tooltip
+              labelFormatter={(date) => formatShortDate(date as string)}
+              formatter={(value) => [`${value}`, 'Performance Score']}
+              contentStyle={{ background: 'var(--card)', border: '1px solid var(--border)', borderRadius: 8, fontSize: 12 }}
             />
-            <Tooltip 
-              labelFormatter={(date) => formatShortDate(date)}
-              formatter={(value, name) => [
-                `${value}${metricConfig.unit}`, 
-                name === 'desktop' ? 'Desktop' : 'Mobile'
-              ]}
-            />
-            <Legend />
-            <Line
-              dataKey={filters.metric}
-              data={desktopData}
-              stroke="#3b82f6"
-              strokeWidth={2}
-              dot={{ fill: '#3b82f6', strokeWidth: 2, r: 4 }}
-              name="desktop"
-              connectNulls={false}
-            />
-            <Line
-              dataKey={filters.metric}
-              data={mobileData}
-              stroke="#8b5cf6"
-              strokeWidth={2}
-              dot={{ fill: '#8b5cf6', strokeWidth: 2, r: 4 }}
-              name="mobile"
-              connectNulls={false}
-            />
+            <Line type="monotone" dataKey="performanceScore" stroke="var(--brand)" strokeWidth={2.5} dot={false} />
           </LineChart>
         </ResponsiveContainer>
-      </div>
-
-      {/* Summary Stats */}
-      <div className="flex items-center gap-4">
-        <div className="flex items-center gap-2">
-          <Monitor className="h-4 w-4 text-blue-500" />
-          <span className="text-sm">Desktop Avg:</span>
-          <Badge variant="secondary">
-            {desktopData.length > 0 
-              ? Math.round(desktopData.reduce((sum, d) => sum + (d[filters.metric] || 0), 0) / desktopData.length)
-              : 'No data'
-            }{metricConfig.unit}
-          </Badge>
-        </div>
-        
-        <div className="flex items-center gap-2">
-          <Smartphone className="h-4 w-4 text-purple-500" />
-          <span className="text-sm">Mobile Avg:</span>
-          <Badge variant="secondary">
-            {mobileData.length > 0 
-              ? Math.round(mobileData.reduce((sum, d) => sum + (d[filters.metric] || 0), 0) / mobileData.length)
-              : 'No data'
-            }{metricConfig.unit}
-          </Badge>
-        </div>
-      </div>
+      )}
     </div>
   );
+}
+
+function buildCompareData(measurements: any[], productIds: string[], device: DeviceType): Array<Record<string, any>> {
+  const idSet = new Set(productIds);
+  const byDate = new Map<string, Record<string, number[]>>();
+
+  for (const m of measurements) {
+    if (m.deviceType !== device || !idSet.has(m.productId)) continue;
+    const date = new Date(m.measurementDate).toISOString().split('T')[0];
+    if (!byDate.has(date)) byDate.set(date, {});
+    const bucket = byDate.get(date)!;
+    if (!bucket[m.productId]) bucket[m.productId] = [];
+    bucket[m.productId].push(m.performanceScore);
+  }
+
+  return Array.from(byDate.entries())
+    .map(([date, scoresByProduct]) => {
+      const row: Record<string, any> = { date };
+      for (const id of productIds) {
+        const scores = scoresByProduct[id];
+        if (scores?.length) row[id] = Math.round(scores.reduce((a, b) => a + b, 0) / scores.length);
+      }
+      return row;
+    })
+    .sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
 }
