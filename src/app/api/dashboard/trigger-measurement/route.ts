@@ -7,6 +7,11 @@ import { triggerMeasurementJob } from '@/lib/services/measurement-job';
 // endpoint (e.g. POST /api/measurements) is already reachable the same way.
 // This route exists so the dashboard no longer has to ship CRON_SECRET into
 // client JS just to call the externally-facing, secret-gated cron webhook.
+// Neon's free-tier compute can take a few seconds to wake from suspend; give this
+// route more room than Vercel's 10s Hobby default so a cold-start retry can finish
+// instead of being hard-killed mid-attempt.
+export const maxDuration = 45;
+
 export async function POST() {
   try {
     const databaseService = getDatabaseService();

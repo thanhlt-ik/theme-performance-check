@@ -4,6 +4,11 @@ import { getDatabaseService } from '@/lib/services/database';
 // Lets the dashboard discover an in-flight batch measurement job without
 // already knowing its jobId — used to restore the progress panel after a
 // page reload while a job is still running.
+// Neon's free-tier compute can take a few seconds to wake from suspend; give this
+// route more room than Vercel's 10s Hobby default so a cold-start retry can finish
+// instead of being hard-killed mid-attempt.
+export const maxDuration = 45;
+
 export async function GET() {
   try {
     const databaseService = getDatabaseService();

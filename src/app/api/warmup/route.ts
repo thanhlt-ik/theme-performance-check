@@ -2,6 +2,11 @@ import { NextResponse } from 'next/server';
 import { getDatabaseService } from '@/lib/services/database';
 
 // API route to warm up database connections
+// Neon's free-tier compute can take a few seconds to wake from suspend; give this
+// route more room than Vercel's 10s Hobby default so a cold-start retry can finish
+// instead of being hard-killed mid-attempt.
+export const maxDuration = 45;
+
 export async function GET() {
   try {
     console.log('🔥 Warming up PostgreSQL database connection...');

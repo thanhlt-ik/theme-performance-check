@@ -75,13 +75,18 @@ class DatabaseService {
 
       console.log('🔗 Testing PostgreSQL database connection...');
       
-      const maxRetries = 3;
+      // Bounded low: this whole loop runs inside one HTTP request (there's
+      // no separate background "reconnect" process), and Vercel kills a
+      // Hobby-plan function at 10s by default. Keep the worst case well
+      // under maxDuration (see the API routes) rather than retrying for a
+      // minute and getting hard-killed by the platform mid-attempt anyway.
+      const maxRetries = 2;
       let retryCount = 0;
       
       while (retryCount < maxRetries) {
         try {
           if (retryCount > 0) {
-            const delay = Math.pow(2, retryCount) * 1000; // Exponential backoff: 2s, 4s, 8s
+            const delay = 1000; // short backoff — see the budget note above
             console.log(`⏳ Retry attempt ${retryCount}/${maxRetries} after ${delay}ms delay...`);
             await new Promise(resolve => setTimeout(resolve, delay));
           }
@@ -102,12 +107,14 @@ class DatabaseService {
             return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
           };
 
-          // Neon's free-tier compute can take a while to wake from suspend,
-          // so give the initial connect more room than a typical query.
-          await withTimeout(this.prisma.$connect(), 20000, 'PostgreSQL connection');
+          // Neon's free-tier compute can take a few seconds to wake from
+          // suspend — give the connect a bit more room than the query, but
+          // keep both short enough that 2 attempts plus backoff stays
+          // comfortably under the route's maxDuration.
+          await withTimeout(this.prisma.$connect(), 10000, 'PostgreSQL connection');
 
           // Test with a simple query
-          await withTimeout(this.prisma.$queryRaw`SELECT 1 as test, NOW() as timestamp`, 10000, 'PostgreSQL warmup query');
+          await withTimeout(this.prisma.$queryRaw`SELECT 1 as test, NOW() as timestamp`, 5000, 'PostgreSQL warmup query');
           
           console.log('✅ PostgreSQL database connected successfully');
           this.isConnected = true;
@@ -222,6 +229,7 @@ class DatabaseService {
   }
 
   async getActiveProducts(): Promise<Product[]> {
+    await this.ensureConnection();
     if (!this.isConnected || !this.prisma) {
       console.log('🎭 Using demo data (database not available)');
       return this.getProductionDemoProducts().filter(p => p.isActive);
@@ -236,6 +244,7 @@ class DatabaseService {
   }
 
   async getProductById(id: string): Promise<Product | null> {
+    await this.ensureConnection();
     if (!this.isConnected || !this.prisma) {
       console.log('🎭 Using demo data for getProductById (database not available)');
       const demoProducts = this.getProductionDemoProducts();
@@ -253,16 +262,18 @@ class DatabaseService {
     description?: string;
     isActive?: boolean;
   }): Promise<Product> {
+    await this.ensureConnection();
     this.throwIfNotConnected();
-    
+
     const product = await this.prisma.product.create({ data });
     console.log('✅ Product created in database:', product.name);
     return product;
   }
 
   async findProductByUrl(url: string): Promise<Product | null> {
+    await this.ensureConnection();
     this.throwIfNotConnected();
-    
+
     return await this.prisma.product.findFirst({
       where: { url }
     });
@@ -284,6 +295,7 @@ class DatabaseService {
     diagnostics?: Prisma.JsonValue | null;
     measurementDate?: Date;
   }): Promise<PerformanceMeasurement> {
+    await this.ensureConnection();
     if (!this.isConnected || !this.prisma) {
       console.log('🎭 Creating demo measurement (database not available)');
       
@@ -414,6 +426,7 @@ class DatabaseService {
     limit?: number;
     offset?: number;
   } = {}): Promise<PerformanceMeasurement[]> {
+    await this.ensureConnection();
     if (!this.isConnected || !this.prisma) {
       console.log('🎭 Using demo measurements (database not available)');
       // Return empty array for demo - measurements need real API calls
@@ -446,8 +459,9 @@ class DatabaseService {
     desktop?: PerformanceMeasurement;
     mobile?: PerformanceMeasurement;
   }> {
+    await this.ensureConnection();
     this.throwIfNotConnected();
-    
+
     const [desktop, mobile] = await Promise.all([
       this.prisma.performanceMeasurement.findFirst({
         where: { productId, deviceType: DeviceType.DESKTOP },
@@ -543,22 +557,26 @@ class DatabaseService {
   }
 
   async updateProduct(id: string, data: any): Promise<Product> {
+    await this.ensureConnection();
     this.throwIfNotConnected();
     return await this.prisma.product.update({ where: { id }, data });
   }
 
   async deleteProduct(id: string): Promise<void> {
+    await this.ensureConnection();
     this.throwIfNotConnected();
     await this.prisma.product.delete({ where: { id } });
     console.log('✅ Product deleted from database:', id);
   }
 
   async getTotalMeasurements(): Promise<number> {
+    await this.ensureConnection();
     this.throwIfNotConnected();
     return await this.prisma.performanceMeasurement.count();
   }
 
   async getLastUpdated(): Promise<Date | null> {
+    await this.ensureConnection();
     this.throwIfNotConnected();
     const latest = await this.prisma.performanceMeasurement.findFirst({
       orderBy: { measurementDate: 'desc' },
@@ -569,6 +587,7 @@ class DatabaseService {
 
   // Stub methods for compatibility
   async getAverageScores(productId: string, days: number = 30) {
+    await this.ensureConnection();
     this.throwIfNotConnected();
     
     const measurements = await this.prisma.performanceMeasurement.findMany({
@@ -612,6 +631,7 @@ class DatabaseService {
 
   // Configuration methods
   async getConfig(key: string): Promise<string | null> {
+    await this.ensureConnection();
     // Check if database is connected before attempting to access it
     if (!this.isConnected || !this.prisma) {
       console.log('⚠️ Database not connected, returning null for config:', key);
@@ -630,6 +650,7 @@ class DatabaseService {
   }
 
   async setConfig(key: string, value: string): Promise<void> {
+    await this.ensureConnection();
     // Check if database is connected before attempting to access it
     if (!this.isConnected || !this.prisma) {
       console.log('⚠️ Database not connected, cannot save config:', key);
@@ -648,6 +669,7 @@ class DatabaseService {
     }
   }
   async getMeasurementStats(dateRange?: DateRange) {
+    await this.ensureConnection();
     this.throwIfNotConnected();
     
     const where = dateRange ? {

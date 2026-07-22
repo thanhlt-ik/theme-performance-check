@@ -7,6 +7,11 @@ import { ProductsConfig, ProductConfig } from '@/lib/types';
 const db = getDatabaseService();
 
 // GET all products from database
+// Neon's free-tier compute can take a few seconds to wake from suspend; give this
+// route more room than Vercel's 10s Hobby default so a cold-start retry can finish
+// instead of being hard-killed mid-attempt.
+export const maxDuration = 45;
+
 export async function GET(request: NextRequest) {
   try {
     const searchParams = request.nextUrl.searchParams;
