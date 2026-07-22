@@ -89,16 +89,25 @@ class DatabaseService {
           // Ensure clean connection
           await this.prisma.$disconnect().catch(() => {});
 
-          // Set connection timeout
-          const connectionTimeout = setTimeout(() => {
-            throw new Error('PostgreSQL connection timeout after 15 seconds');
-          }, 15000);
+          // Race against a timeout that actually rejects the awaited promise
+          // (a bare setTimeout(() => throw) doesn't cancel anything — it just
+          // throws later, unhandled, on its own tick), so a stuck connect
+          // during a Neon cold-start properly falls through to the retry
+          // loop below instead of hanging indefinitely.
+          const withTimeout = <T>(promise: Promise<T>, ms: number, label: string): Promise<T> => {
+            let timer: ReturnType<typeof setTimeout>;
+            const timeout = new Promise<never>((_, reject) => {
+              timer = setTimeout(() => reject(new Error(`${label} timed out after ${ms / 1000}s`)), ms);
+            });
+            return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+          };
 
-          await this.prisma.$connect();
-          clearTimeout(connectionTimeout);
+          // Neon's free-tier compute can take a while to wake from suspend,
+          // so give the initial connect more room than a typical query.
+          await withTimeout(this.prisma.$connect(), 20000, 'PostgreSQL connection');
 
           // Test with a simple query
-          await this.prisma.$queryRaw`SELECT 1 as test, NOW() as timestamp`;
+          await withTimeout(this.prisma.$queryRaw`SELECT 1 as test, NOW() as timestamp`, 10000, 'PostgreSQL warmup query');
           
           console.log('✅ PostgreSQL database connected successfully');
           this.isConnected = true;
