@@ -320,5 +320,29 @@ export async function triggerMeasurementJob(databaseService: any) {
 
 export async function getJobHistory(databaseService: any): Promise<JobHistoryEntry[]> {
   const raw = await databaseService.getConfig(JOB_HISTORY_KEY);
-  return raw ? JSON.parse(raw) : [];
+  let list: JobHistoryEntry[] = raw ? JSON.parse(raw) : [];
+
+  // getJobProgress() only heals a job the moment something reads its
+  // specific progress record — a history entry nobody has looked at since
+  // (or one whose background process died before ever writing a progress
+  // record at all, e.g. killed right after the triggering response was
+  // sent) stays "running" forever otherwise.
+  const runningEntries = list.filter((e) => e.status === 'running');
+  if (runningEntries.length > 0) {
+    await Promise.all(runningEntries.map((e) => getJobProgress(databaseService, e.jobId)));
+
+    const refreshed = await databaseService.getConfig(JOB_HISTORY_KEY);
+    list = refreshed ? JSON.parse(refreshed) : list;
+
+    const stillRunning = list.filter((e) => e.status === 'running');
+    if (stillRunning.length > 0) {
+      const now = new Date().toISOString();
+      list = list.map((e) =>
+        e.status === 'running' ? { ...e, status: 'completed' as const, finishedAt: e.finishedAt ?? now } : e
+      );
+      await databaseService.setConfig(JOB_HISTORY_KEY, JSON.stringify(list));
+    }
+  }
+
+  return list;
 }
