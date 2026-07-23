@@ -535,17 +535,21 @@ class DatabaseService {
   async reconnect(): Promise<boolean> {
     try {
       console.log('🔄 Attempting to reconnect to database...');
-      
-      if (this.prisma) {
-        await this.prisma.$disconnect().catch(() => {});
-      }
-      
+
+      // No $disconnect() here — this.prisma is shared, and other in-flight
+      // requests may be mid-query against it right now (same bug as the
+      // one fixed in testConnection's retry loop: disconnecting a client
+      // other callers depend on is what produces "Engine is not yet
+      // connected" for them). $connect() alone reconnects cleanly.
       this.isConnected = false;
       this.connectionError = null;
       this.connectionPromise = this.testConnection();
-      await this.connectionPromise;
-      this.connectionPromise = null;
-      
+      try {
+        await this.connectionPromise;
+      } finally {
+        this.connectionPromise = null;
+      }
+
       return this.isConnected;
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : 'Unknown error';
