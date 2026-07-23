@@ -9,7 +9,10 @@ const CURRENT_JOB_KEY = 'current_job_id';
 // If a "running" job hasn't written a progress update in this long, the
 // process running it is gone (killed, crashed, redeployed) and nothing will
 // ever finish it — treat it as abandoned instead of showing it forever.
-const STALE_JOB_THRESHOLD_MS = 5 * 60 * 1000;
+// Generous on purpose: the job is normally driven every ~2 minutes by the
+// external cron and every ~20-40s by an open dashboard tab, so this only
+// fires for a genuinely dead run, not an ordinary gap between pings.
+const STALE_JOB_THRESHOLD_MS = 20 * 60 * 1000;
 
 function jobProgressKey(jobId: string): string {
   return `job_progress:${jobId}`;
@@ -317,18 +320,45 @@ export async function runMeasurementCycle(databaseService: any, options: { force
     await databaseService.setConfig(CURRENT_JOB_KEY, '');
   }
 
-  if (!options.forceNewRun) {
-    // The external cron fires many times a day to advance an in-progress
-    // job — it should only ever kick off one fresh full run per day, not
-    // start over every time it happens to find nothing in progress.
-    const history = await getJobHistory(databaseService);
-    const startedToday = history.find((e) => e.startedAt.startsWith(todayDateString()));
-    if (startedToday) {
+  // Today's most recent job may have been marked "completed" by staleness
+  // healing while it still has unmeasured products left (e.g. nobody drove
+  // it for a while) — resume that instead of abandoning its progress and
+  // starting a brand new 34-item run from zero.
+  const history = await getJobHistory(databaseService);
+  const todayJob = history.find((e) => e.startedAt.startsWith(todayDateString()));
+
+  if (todayJob) {
+    const todaySnapshot = await getJobProgress(databaseService, todayJob.jobId);
+    const hasUnfinishedItems = todaySnapshot?.items.some((it) => it.status === 'pending' || it.status === 'running');
+
+    if (todaySnapshot && hasUnfinishedItems) {
+      todaySnapshot.status = 'running';
+      todaySnapshot.finishedAt = undefined;
+      // Items stuck at "running" are leftover from whatever attempt got cut
+      // off mid-measurement — requeue them as pending, otherwise
+      // processNextChunk sees zero pending items and immediately declares
+      // the job finished again without ever measuring them.
+      for (const item of todaySnapshot.items) {
+        if (item.status === 'running') {
+          item.status = 'pending';
+        }
+      }
+      await saveProgress(databaseService, todaySnapshot);
+      await updateJobHistory(databaseService, todayJob.jobId, { status: 'running', finishedAt: undefined });
+      await databaseService.setConfig(CURRENT_JOB_KEY, todayJob.jobId);
+      await databaseService.setConfig('active_job_id', todayJob.jobId);
+      return processNextChunk(databaseService, todaySnapshot);
+    }
+
+    if (!options.forceNewRun) {
+      // The external cron fires many times a day to advance an in-progress
+      // job — it should only ever kick off one fresh full run per day, not
+      // start over every time it happens to find nothing in progress.
       return {
         success: true,
         message: 'Already ran today',
-        jobId: startedToday.jobId,
-        status: startedToday.status,
+        jobId: todayJob.jobId,
+        status: todayJob.status,
       };
     }
   }

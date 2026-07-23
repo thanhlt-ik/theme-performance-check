@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { ChevronDown, ChevronRight, Check, X, CircleDashed, Loader2 } from 'lucide-react';
-import { formatRelativeTime } from '@/lib/utils/date';
+import { formatRelativeTime, formatDateInTimezone } from '@/lib/utils/date';
 import { JobHistoryEntry, JobProgressSnapshot } from '@/lib/types/job-progress';
 
 const POLL_INTERVAL_MS = 4000;
@@ -161,12 +161,15 @@ export function JobHistory() {
                   <ChevronRight className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
                 )}
                 <div className="flex-1 min-w-0">
-                  <div className="text-[13px] font-semibold text-foreground">
-                    {formatRelativeTime(job.startedAt)}
+                  <div className="flex items-baseline gap-2 text-[13px] font-semibold text-foreground">
+                    <span className="tabular-nums">{formatDateInTimezone(job.startedAt, 'dd/MM/yyyy HH:mm')}</span>
+                    <span className="text-[11px] font-normal text-faint">({formatRelativeTime(job.startedAt)})</span>
                   </div>
                   <div className="flex items-center gap-1.5 text-[11px] text-faint">
                     {isRunning && <Loader2 className="h-3 w-3 shrink-0 animate-spin text-brand" />}
-                    {isRunning ? 'Đang chạy' : `Hoàn tất trong ${formatDuration(job.startedAt, job.finishedAt)}`}
+                    {isRunning
+                      ? 'Đang chạy'
+                      : `Xong lúc ${formatDateInTimezone(job.finishedAt ?? job.startedAt, 'HH:mm')} · mất ${formatDuration(job.startedAt, job.finishedAt)}`}
                   </div>
                 </div>
                 <div className="shrink-0 text-xs tabular-nums text-foreground font-semibold">
