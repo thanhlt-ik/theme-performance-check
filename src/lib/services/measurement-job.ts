@@ -4,6 +4,7 @@ import { JobHistoryEntry, JobProgressItem, JobProgressSnapshot } from '@/lib/typ
 
 const JOB_HISTORY_KEY = 'job_history';
 const JOB_HISTORY_LIMIT = 30;
+const CURRENT_JOB_KEY = 'current_job_id';
 
 // If a "running" job hasn't written a progress update in this long, the
 // process running it is gone (killed, crashed, redeployed) and nothing will
@@ -12,6 +13,10 @@ const STALE_JOB_THRESHOLD_MS = 5 * 60 * 1000;
 
 function jobProgressKey(jobId: string): string {
   return `job_progress:${jobId}`;
+}
+
+function todayDateString(): string {
+  return new Date().toISOString().split('T')[0];
 }
 
 async function saveProgress(databaseService: any, snapshot: JobProgressSnapshot): Promise<void> {
@@ -70,252 +75,13 @@ export async function getJobProgress(databaseService: any, jobId: string): Promi
     if (activeJobId === jobId) {
       await databaseService.setConfig('active_job_id', '');
     }
+    const currentJobId = await databaseService.getConfig(CURRENT_JOB_KEY);
+    if (currentJobId === jobId) {
+      await databaseService.setConfig(CURRENT_JOB_KEY, '');
+    }
   }
 
   return snapshot;
-}
-
-function chunkArray<T>(array: T[], chunkSize: number): T[][] {
-  const result: T[][] = [];
-  for (let i = 0; i < array.length; i += chunkSize) {
-    result.push(array.slice(i, i + chunkSize));
-  }
-  return result;
-}
-
-// Runs the full batch measurement job in the background: measures every
-// active product on both devices, persisting live progress to SystemConfig
-// so the dashboard's job progress panel and job history can poll it.
-async function processMeasurements(products: any[], databaseService: any, jobId: string) {
-  let snapshot: JobProgressSnapshot | null = null;
-  try {
-    console.log(`🕐 [Job ${jobId}] Processing measurements in background...`);
-    const startTime = Date.now();
-
-    const pageSpeedService = new PageSpeedService();
-    const results = [];
-    const deviceTypes = ['DESKTOP', 'MOBILE'] as DeviceType[];
-
-    const progressItems: JobProgressItem[] = products.flatMap((product) =>
-      deviceTypes.map((deviceType) => ({
-        productId: product.id,
-        product: product.name,
-        deviceType,
-        status: 'pending' as const,
-      }))
-    );
-    snapshot = {
-      jobId,
-      status: 'running',
-      totalItems: progressItems.length,
-      completedItems: 0,
-      failedItems: 0,
-      startedAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
-      items: progressItems,
-    };
-    await databaseService.setConfig('active_job_id', jobId);
-    await saveProgress(databaseService, snapshot!);
-
-    const findItem = (productId: string, deviceType: DeviceType) =>
-      snapshot!.items.find((it) => it.productId === productId && it.deviceType === deviceType)!;
-
-    const BATCH_SIZE = 3; // Each batch processes maximum 3 products
-    const productBatches = chunkArray(products, BATCH_SIZE);
-    const totalBatches = productBatches.length;
-
-    console.log(`📦 [Job ${jobId}] Processing ${products.length} products in ${totalBatches} batches of ${BATCH_SIZE}`);
-
-    let batchIndex = 0;
-    for (const batch of productBatches) {
-      batchIndex++;
-      console.log(`📋 [Job ${jobId}] Starting batch ${batchIndex}/${totalBatches} with ${batch.length} products`);
-
-      if (batchIndex > 1) {
-        const batchDelayMs = 60000; // 60 seconds rest between batches
-        console.log(`⏱️ [Job ${jobId}] Waiting ${batchDelayMs / 1000}s between batches...`);
-        await new Promise(resolve => setTimeout(resolve, batchDelayMs));
-      }
-
-      for (const product of batch) {
-        console.log(`🔍 [Job ${jobId}] Measuring ${product.name}... (batch ${batchIndex}/${totalBatches})`);
-
-        for (const deviceType of deviceTypes) {
-          const progressItem = findItem(product.id, deviceType);
-          progressItem.status = 'running';
-          await saveProgress(databaseService, snapshot!);
-
-          try {
-            if (results.length > 0) {
-              await new Promise(resolve => setTimeout(resolve, 2000)); // 2 second delay
-            }
-
-            const measurement = await pageSpeedService.measurePerformance(
-              product.url,
-              deviceType
-            );
-
-            const savedMeasurement = await databaseService.createMeasurement({
-              productId: product.id,
-              deviceType,
-              performanceScore: measurement.performanceScore,
-              fcp: measurement.fcp,
-              lcp: measurement.lcp,
-              cls: measurement.cls,
-              fid: measurement.fid,
-              ttfb: measurement.ttfb,
-              speedIndex: measurement.speedIndex,
-              tbt: measurement.tbt,
-              opportunity: null,
-              diagnostics: null,
-              measurementDate: new Date()
-            });
-
-            results.push({
-              product: product.name,
-              deviceType,
-              score: measurement.performanceScore,
-              success: true,
-              measurementId: savedMeasurement.id
-            });
-
-            progressItem.status = 'done';
-            progressItem.score = measurement.performanceScore;
-            snapshot!.completedItems++;
-            await saveProgress(databaseService, snapshot!);
-
-            console.log(`✅ [Job ${jobId}] ${product.name} (${deviceType}): Score ${measurement.performanceScore}`);
-
-          } catch (error) {
-            console.error(`❌ [Job ${jobId}] Failed to measure ${product.name} (${deviceType}):`, error);
-            results.push({
-              product: product.name,
-              deviceType,
-              success: false,
-              error: error instanceof Error ? error.message : 'Unknown error'
-            });
-
-            progressItem.status = 'failed';
-            progressItem.error = error instanceof Error ? error.message : 'Unknown error';
-            snapshot!.failedItems++;
-            await saveProgress(databaseService, snapshot!);
-          }
-        }
-      }
-    }
-
-    snapshot!.status = 'completed';
-    snapshot!.finishedAt = new Date().toISOString();
-    await saveProgress(databaseService, snapshot!);
-    await databaseService.setConfig('active_job_id', '');
-    await updateJobHistory(databaseService, jobId, {
-      status: 'completed',
-      finishedAt: snapshot!.finishedAt,
-      totalItems: snapshot!.totalItems,
-      completedItems: snapshot!.completedItems,
-      failedItems: snapshot!.failedItems,
-    });
-
-    const duration = Date.now() - startTime;
-    const successCount = results.filter(r => r.success).length;
-    const failureCount = results.filter(r => !r.success).length;
-
-    console.log(`🎉 [Job ${jobId}] Cron job completed in ${Math.round(duration / 1000)}s`);
-    console.log(`📈 [Job ${jobId}] Success: ${successCount}, Failed: ${failureCount}`);
-
-    try {
-      await databaseService.setConfig('last_cron_run', new Date().toISOString());
-      await databaseService.setConfig('last_cron_results', JSON.stringify({
-        totalProducts: products.length,
-        successCount,
-        failureCount,
-        duration,
-        timestamp: new Date().toISOString(),
-        jobId
-      }));
-    } catch (configError) {
-      console.warn(`[Job ${jobId}] Failed to save cron run summary:`, configError);
-    }
-
-    return {
-      success: true,
-      jobId,
-      results,
-      summary: {
-        totalProducts: products.length,
-        totalMeasurements: results.length,
-        successCount,
-        failureCount,
-        duration: `${Math.round(duration / 1000)}s`
-      }
-    };
-  } catch (error) {
-    console.error(`❌ [Job ${jobId}] Background processing failed:`, error);
-
-    if (snapshot) {
-      snapshot.status = 'completed';
-      snapshot.finishedAt = new Date().toISOString();
-      await saveProgress(databaseService, snapshot).catch(() => {});
-      await updateJobHistory(databaseService, jobId, {
-        status: 'completed',
-        finishedAt: snapshot.finishedAt,
-        completedItems: snapshot.completedItems,
-        failedItems: snapshot.failedItems,
-      }).catch(() => {});
-    }
-    await databaseService.setConfig('active_job_id', '').catch(() => {});
-
-    return {
-      success: false,
-      jobId,
-      error: error instanceof Error ? error.message : 'Unknown background processing error'
-    };
-  }
-}
-
-// Kicks off a batch measurement job for every active product and returns
-// immediately — the job itself finishes in the background. Shared by the
-// external cron webhook and the dashboard's own "Test Run" trigger so both
-// entry points behave identically.
-export async function triggerMeasurementJob(databaseService: any) {
-  const jobId = `job-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`;
-  const products = await databaseService.getActiveProducts();
-
-  console.log(`📊 Found ${products.length} active products to measure`);
-
-  if (products.length === 0) {
-    return {
-      success: true,
-      message: 'No active products to measure',
-      results: [],
-      jobId: null,
-      totalProducts: 0,
-    };
-  }
-
-  await appendJobHistory(databaseService, {
-    jobId,
-    status: 'running',
-    totalItems: products.length * 2,
-    completedItems: 0,
-    failedItems: 0,
-    startedAt: new Date().toISOString(),
-  });
-
-  console.log(`🚀 [Job ${jobId}] Starting background processing for ${products.length} products`);
-
-  processMeasurements(products, databaseService, jobId).catch((error) => {
-    console.error(`❌ [Job ${jobId}] Unhandled background error:`, error);
-  });
-
-  return {
-    success: true,
-    message: `Started processing ${products.length} products in background`,
-    jobId,
-    status: 'PROCESSING',
-    startedAt: new Date().toISOString(),
-    totalProducts: products.length,
-  };
 }
 
 export async function getJobHistory(databaseService: any): Promise<JobHistoryEntry[]> {
@@ -345,4 +111,227 @@ export async function getJobHistory(databaseService: any): Promise<JobHistoryEnt
   }
 
   return list;
+}
+
+async function finishJob(databaseService: any, snapshot: JobProgressSnapshot) {
+  snapshot.status = 'completed';
+  snapshot.finishedAt = new Date().toISOString();
+  await saveProgress(databaseService, snapshot);
+  await updateJobHistory(databaseService, snapshot.jobId, {
+    status: 'completed',
+    finishedAt: snapshot.finishedAt,
+    completedItems: snapshot.completedItems,
+    failedItems: snapshot.failedItems,
+  });
+  await databaseService.setConfig(CURRENT_JOB_KEY, '');
+  await databaseService.setConfig('active_job_id', '');
+
+  const duration = new Date(snapshot.finishedAt).getTime() - new Date(snapshot.startedAt).getTime();
+  await databaseService.setConfig('last_cron_run', new Date().toISOString()).catch(() => {});
+  await databaseService.setConfig('last_cron_results', JSON.stringify({
+    totalProducts: Math.round(snapshot.totalItems / 2),
+    successCount: snapshot.completedItems,
+    failureCount: snapshot.failedItems,
+    duration,
+    timestamp: new Date().toISOString(),
+    jobId: snapshot.jobId,
+  })).catch(() => {});
+
+  console.log(`🎉 [Job ${snapshot.jobId}] Completed — ${snapshot.completedItems}/${snapshot.totalItems} ok, ${snapshot.failedItems} failed`);
+
+  return {
+    success: true,
+    jobId: snapshot.jobId,
+    status: 'completed' as const,
+    totalProducts: Math.round(snapshot.totalItems / 2),
+    completedItems: snapshot.completedItems,
+    failedItems: snapshot.failedItems,
+    totalItems: snapshot.totalItems,
+  };
+}
+
+// Processes exactly one product's worth of measurements (both devices, if
+// both are still pending) and returns. Each invocation is short enough
+// (~1-2 PageSpeed calls) to always finish well inside a route's
+// maxDuration — unlike the old design, nothing here waits on a 60-second
+// inter-batch sleep or tries to run for the job's full ~20-minute span in
+// one background task, which Vercel doesn't reliably let survive past the
+// triggering response anyway.
+async function processNextChunk(databaseService: any, snapshot: JobProgressSnapshot) {
+  const pendingItems = snapshot.items.filter((it) => it.status === 'pending');
+
+  if (pendingItems.length === 0) {
+    return finishJob(databaseService, snapshot);
+  }
+
+  const nextProductId = pendingItems[0].productId;
+  const chunk = pendingItems.filter((it) => it.productId === nextProductId);
+  const product = await databaseService.getProductById(nextProductId);
+
+  if (!product) {
+    // Product was deleted/deactivated after the job started — skip it.
+    for (const item of chunk) {
+      item.status = 'failed';
+      item.error = 'Product no longer exists';
+      snapshot.failedItems++;
+    }
+    await saveProgress(databaseService, snapshot);
+    return {
+      success: true,
+      jobId: snapshot.jobId,
+      status: 'running' as const,
+      completedItems: snapshot.completedItems,
+      failedItems: snapshot.failedItems,
+      totalItems: snapshot.totalItems,
+    };
+  }
+
+  const pageSpeedService = new PageSpeedService();
+  let isFirstInChunk = true;
+
+  for (const item of chunk) {
+    item.status = 'running';
+    await saveProgress(databaseService, snapshot);
+
+    try {
+      if (!isFirstInChunk) {
+        await new Promise((resolve) => setTimeout(resolve, 2000)); // respect PageSpeed rate limits
+      }
+      isFirstInChunk = false;
+
+      const measurement = await pageSpeedService.measurePerformance(product.url, item.deviceType);
+
+      await databaseService.createMeasurement({
+        productId: item.productId,
+        deviceType: item.deviceType,
+        performanceScore: measurement.performanceScore,
+        fcp: measurement.fcp,
+        lcp: measurement.lcp,
+        cls: measurement.cls,
+        fid: measurement.fid,
+        ttfb: measurement.ttfb,
+        speedIndex: measurement.speedIndex,
+        tbt: measurement.tbt,
+        opportunity: null,
+        diagnostics: null,
+        measurementDate: new Date(),
+      });
+
+      item.status = 'done';
+      item.score = measurement.performanceScore;
+      snapshot.completedItems++;
+      console.log(`✅ [Job ${snapshot.jobId}] ${item.product} (${item.deviceType}): ${measurement.performanceScore}`);
+    } catch (error) {
+      item.status = 'failed';
+      item.error = error instanceof Error ? error.message : 'Unknown error';
+      snapshot.failedItems++;
+      console.error(`❌ [Job ${snapshot.jobId}] ${item.product} (${item.deviceType}) failed:`, error);
+    }
+
+    await saveProgress(databaseService, snapshot);
+  }
+
+  const stillPending = snapshot.items.some((it) => it.status === 'pending');
+  if (!stillPending) {
+    return finishJob(databaseService, snapshot);
+  }
+
+  return {
+    success: true,
+    jobId: snapshot.jobId,
+    status: 'running' as const,
+    totalProducts: Math.round(snapshot.totalItems / 2),
+    completedItems: snapshot.completedItems,
+    failedItems: snapshot.failedItems,
+    totalItems: snapshot.totalItems,
+  };
+}
+
+async function startNewJob(databaseService: any) {
+  const products = await databaseService.getActiveProducts();
+
+  if (products.length === 0) {
+    return {
+      success: true,
+      message: 'No active products to measure',
+      jobId: null,
+      totalProducts: 0,
+    };
+  }
+
+  const jobId = `job-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`;
+  const deviceTypes = ['DESKTOP', 'MOBILE'] as DeviceType[];
+  const items: JobProgressItem[] = products.flatMap((product: any) =>
+    deviceTypes.map((deviceType) => ({
+      productId: product.id,
+      product: product.name,
+      deviceType,
+      status: 'pending' as const,
+    }))
+  );
+
+  const snapshot: JobProgressSnapshot = {
+    jobId,
+    status: 'running',
+    totalItems: items.length,
+    completedItems: 0,
+    failedItems: 0,
+    startedAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    items,
+  };
+
+  await appendJobHistory(databaseService, {
+    jobId,
+    status: 'running',
+    totalItems: items.length,
+    completedItems: 0,
+    failedItems: 0,
+    startedAt: snapshot.startedAt,
+  });
+  await databaseService.setConfig(CURRENT_JOB_KEY, jobId);
+  await databaseService.setConfig('active_job_id', jobId); // read by /api/cron/measurements/active
+  await saveProgress(databaseService, snapshot);
+
+  console.log(`🚀 [Job ${jobId}] Started — ${products.length} products, ${items.length} measurements`);
+
+  return processNextChunk(databaseService, snapshot);
+}
+
+// Advances measurement work by exactly one chunk per call — starts a new
+// job if none is in progress (subject to the once-a-day guard below), or
+// continues whichever job is already running. Meant to be called
+// repeatedly (by the external cron every couple of minutes, and by the
+// dashboard's own polling while a job is in view) rather than once and
+// left to run unattended in the background.
+export async function runMeasurementCycle(databaseService: any, options: { forceNewRun?: boolean } = {}) {
+  const currentJobId = await databaseService.getConfig(CURRENT_JOB_KEY);
+
+  if (currentJobId) {
+    const snapshot = await getJobProgress(databaseService, currentJobId);
+    if (snapshot && snapshot.status === 'running') {
+      return processNextChunk(databaseService, snapshot);
+    }
+    // Snapshot missing, or getJobProgress just healed it as abandoned —
+    // either way it's not usable as "the job in progress" anymore.
+    await databaseService.setConfig(CURRENT_JOB_KEY, '');
+  }
+
+  if (!options.forceNewRun) {
+    // The external cron fires many times a day to advance an in-progress
+    // job — it should only ever kick off one fresh full run per day, not
+    // start over every time it happens to find nothing in progress.
+    const history = await getJobHistory(databaseService);
+    const startedToday = history.find((e) => e.startedAt.startsWith(todayDateString()));
+    if (startedToday) {
+      return {
+        success: true,
+        message: 'Already ran today',
+        jobId: startedToday.jobId,
+        status: startedToday.status,
+      };
+    }
+  }
+
+  return startNewJob(databaseService);
 }

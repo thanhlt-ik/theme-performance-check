@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getDatabaseService } from '@/lib/services/database';
-import { triggerMeasurementJob } from '@/lib/services/measurement-job';
+import { runMeasurementCycle } from '@/lib/services/measurement-job';
 
 // Verify cron secret to prevent unauthorized access. This route is the
 // externally-reachable webhook (e.g. cron-job.org) — it stays secret-gated.
@@ -24,10 +24,11 @@ function verifyCronSecret(request: NextRequest): boolean {
   return token === cronSecret;
 }
 
-// Neon's free-tier compute can take a few seconds to wake from suspend; give this
-// route more room than Vercel's 10s Hobby default so a cold-start retry can finish
-// instead of being hard-killed mid-attempt.
-export const maxDuration = 45;
+// Each call processes one product's worth of PageSpeed measurements (up to
+// 2 calls) rather than the whole job — still needs real room since a single
+// PageSpeed Insights run can itself take 15-30s. 60s is the max Vercel
+// allows to configure on the Hobby plan.
+export const maxDuration = 60;
 
 export async function POST(request: NextRequest) {
   try {
@@ -38,9 +39,9 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    console.log('🕐 Starting automated performance measurements...');
+    console.log('🕐 Advancing automated performance measurements...');
     const databaseService = getDatabaseService();
-    const result = await triggerMeasurementJob(databaseService);
+    const result = await runMeasurementCycle(databaseService);
 
     return NextResponse.json(result);
   } catch (error) {

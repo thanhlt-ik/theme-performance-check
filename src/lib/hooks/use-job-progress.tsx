@@ -42,6 +42,13 @@ export function JobProgressProvider({ children }: { children: React.ReactNode })
 
     const poll = async () => {
       try {
+        // Each chunk only advances one product's worth of measurements — a
+        // job needs this called repeatedly to finish. The external cron
+        // provides that cadence for unattended runs, but a human watching
+        // the panel shouldn't have to wait on a multi-minute cron interval,
+        // so keep nudging it forward for as long as this tab has it open.
+        await fetch('/api/dashboard/trigger-measurement', { method: 'POST' }).catch(() => {});
+
         const res = await fetch(`/api/cron/measurements/${jobId}`);
         if (res.ok) {
           const data = await res.json();
