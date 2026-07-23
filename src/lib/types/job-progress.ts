@@ -18,6 +18,10 @@ export interface JobProgressSnapshot {
   completedItems: number;
   failedItems: number;
   startedAt: string;
+  // Bumped on every write while the job runs — lets a reader tell "still
+  // actively progressing" apart from "abandoned mid-run and nobody will
+  // ever finish it" (e.g. the process that ran it was killed).
+  updatedAt: string;
   finishedAt?: string;
   items: JobProgressItem[];
 }

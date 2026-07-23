@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getDatabaseService } from '@/lib/services/database';
+import { getJobProgress } from '@/lib/services/measurement-job';
 
 // Returns the live progress snapshot for a batch measurement job, polled by
 // the dashboard's job progress panel. Read-only and unauthenticated, in line
@@ -16,13 +17,13 @@ export async function GET(
   try {
     const { jobId } = await params;
     const databaseService = getDatabaseService();
-    const raw = await databaseService.getConfig(`job_progress:${jobId}`);
+    const progress = await getJobProgress(databaseService, jobId);
 
-    if (!raw) {
+    if (!progress) {
       return NextResponse.json({ success: false, error: 'Job not found' }, { status: 404 });
     }
 
-    return NextResponse.json({ success: true, progress: JSON.parse(raw) });
+    return NextResponse.json({ success: true, progress });
   } catch (error) {
     return NextResponse.json(
       { success: false, error: error instanceof Error ? error.message : 'Internal server error' },

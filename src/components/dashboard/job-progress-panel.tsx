@@ -4,8 +4,13 @@ import { useEffect, useState } from 'react';
 import { ChevronDown, ChevronUp, CircleDashed, Loader2, X, Check } from 'lucide-react';
 import { useJobProgress } from '@/lib/hooks/use-job-progress';
 
+// Defensive cap: the server now auto-heals a job that's stopped reporting
+// progress (see getJobProgress's staleness check), but if an ETA ever comes
+// out absurd anyway, show nothing rather than a nonsense multi-hour countdown.
+const MAX_SANE_ETA_SECONDS = 3 * 60 * 60;
+
 function formatEta(seconds: number): string {
-  if (!isFinite(seconds) || seconds <= 0) return '—';
+  if (!isFinite(seconds) || seconds <= 0 || seconds > MAX_SANE_ETA_SECONDS) return '—';
   const m = Math.floor(seconds / 60);
   const s = Math.round(seconds % 60);
   return m > 0 ? `${m}:${s.toString().padStart(2, '0')}` : `${s}s`;

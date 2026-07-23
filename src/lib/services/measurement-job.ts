@@ -5,11 +5,17 @@ import { JobHistoryEntry, JobProgressItem, JobProgressSnapshot } from '@/lib/typ
 const JOB_HISTORY_KEY = 'job_history';
 const JOB_HISTORY_LIMIT = 30;
 
+// If a "running" job hasn't written a progress update in this long, the
+// process running it is gone (killed, crashed, redeployed) and nothing will
+// ever finish it — treat it as abandoned instead of showing it forever.
+const STALE_JOB_THRESHOLD_MS = 5 * 60 * 1000;
+
 function jobProgressKey(jobId: string): string {
   return `job_progress:${jobId}`;
 }
 
 async function saveProgress(databaseService: any, snapshot: JobProgressSnapshot): Promise<void> {
+  snapshot.updatedAt = new Date().toISOString();
   await databaseService.setConfig(jobProgressKey(snapshot.jobId), JSON.stringify(snapshot));
 }
 
@@ -28,6 +34,45 @@ async function updateJobHistory(databaseService: any, jobId: string, patch: Part
   if (idx === -1) return;
   list[idx] = { ...list[idx], ...patch };
   await databaseService.setConfig(JOB_HISTORY_KEY, JSON.stringify(list));
+}
+
+// Reads a job's progress, self-healing it if it looks abandoned — a
+// "running" snapshot that hasn't been touched in STALE_JOB_THRESHOLD_MS
+// means the process driving it is gone (killed, crashed, redeployed) and
+// nothing will ever move it forward, so treat it as finished rather than
+// showing a live-looking job (and a nonsense ETA) forever.
+export async function getJobProgress(databaseService: any, jobId: string): Promise<JobProgressSnapshot | null> {
+  const raw = await databaseService.getConfig(jobProgressKey(jobId));
+  if (!raw) return null;
+
+  const snapshot: JobProgressSnapshot = JSON.parse(raw);
+
+  // Snapshots written before updatedAt existed have none — fall back to
+  // startedAt so old abandoned jobs still get healed instead of silently
+  // comparing against `undefined` (NaN never satisfies the ">" check below).
+  const lastActivity = new Date(snapshot.updatedAt ?? snapshot.startedAt).getTime();
+  const isStale =
+    snapshot.status === 'running' &&
+    (Number.isNaN(lastActivity) || Date.now() - lastActivity > STALE_JOB_THRESHOLD_MS);
+
+  if (isStale) {
+    snapshot.status = 'completed';
+    snapshot.finishedAt = snapshot.updatedAt ?? new Date().toISOString();
+    await saveProgress(databaseService, snapshot);
+    await updateJobHistory(databaseService, jobId, {
+      status: 'completed',
+      finishedAt: snapshot.finishedAt,
+      completedItems: snapshot.completedItems,
+      failedItems: snapshot.failedItems,
+    });
+
+    const activeJobId = await databaseService.getConfig('active_job_id');
+    if (activeJobId === jobId) {
+      await databaseService.setConfig('active_job_id', '');
+    }
+  }
+
+  return snapshot;
 }
 
 function chunkArray<T>(array: T[], chunkSize: number): T[][] {
@@ -66,6 +111,7 @@ async function processMeasurements(products: any[], databaseService: any, jobId:
       completedItems: 0,
       failedItems: 0,
       startedAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
       items: progressItems,
     };
     await databaseService.setConfig('active_job_id', jobId);
