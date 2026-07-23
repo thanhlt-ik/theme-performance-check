@@ -91,8 +91,12 @@ class DatabaseService {
             await new Promise(resolve => setTimeout(resolve, delay));
           }
 
-          // Ensure clean connection
-          await this.prisma.$disconnect().catch(() => {});
+          // Deliberately not calling $disconnect() before this: this.prisma
+          // is a shared singleton, and other in-flight requests may be
+          // mid-query against it right now. Disconnecting out from under
+          // them is exactly what was producing "Engine is not yet
+          // connected" — $connect() alone is a safe no-op if already
+          // connected, and reconnects cleanly if not.
 
           // Race against a timeout that actually rejects the awaited promise
           // (a bare setTimeout(() => throw) doesn't cancel anything — it just
@@ -155,17 +159,26 @@ class DatabaseService {
   }
 
   private async ensureConnection(): Promise<void> {
+    // Single-flight: if a connection attempt is already in progress, every
+    // concurrent caller awaits that SAME promise rather than each kicking
+    // off (and potentially racing) their own testConnection() call.
     if (this.connectionPromise) {
       console.log('⏳ Waiting for existing connection promise...');
       await this.connectionPromise;
-      this.connectionPromise = null;
+      return;
     }
-    
+
     if (!this.isConnected && this.prisma) {
       console.log('🔄 Connection not active, attempting to reconnect...');
       this.connectionPromise = this.testConnection();
-      await this.connectionPromise;
-      this.connectionPromise = null;
+      try {
+        await this.connectionPromise;
+      } finally {
+        // Always clear this — including on failure — so the next call
+        // starts a fresh attempt instead of re-throwing the same cached
+        // rejection forever.
+        this.connectionPromise = null;
+      }
     }
   }
 
