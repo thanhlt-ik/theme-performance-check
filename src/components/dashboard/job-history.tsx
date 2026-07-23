@@ -1,9 +1,11 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { ChevronDown, ChevronRight, Check, X, CircleDashed, Loader2 } from 'lucide-react';
 import { formatRelativeTime } from '@/lib/utils/date';
 import { JobHistoryEntry, JobProgressSnapshot } from '@/lib/types/job-progress';
+
+const POLL_INTERVAL_MS = 4000;
 
 function formatDuration(startedAt: string, finishedAt?: string): string {
   if (!finishedAt) return '—';
@@ -16,12 +18,32 @@ function formatDuration(startedAt: string, finishedAt?: string): string {
 function JobDetailRows({ jobId }: { jobId: string }) {
   const [snapshot, setSnapshot] = useState<JobProgressSnapshot | null>(null);
   const [loading, setLoading] = useState(true);
+  const pollTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
-    fetch(`/api/cron/measurements/${jobId}`)
-      .then((res) => (res.ok ? res.json() : null))
-      .then((data) => setSnapshot(data?.progress ?? null))
-      .finally(() => setLoading(false));
+    let cancelled = false;
+
+    const load = async () => {
+      try {
+        const res = await fetch(`/api/cron/measurements/${jobId}`);
+        const data = res.ok ? await res.json() : null;
+        if (cancelled) return;
+        setSnapshot(data?.progress ?? null);
+        // Keep refreshing this job's item list live while it's still running,
+        // instead of freezing on whatever it looked like at first click.
+        if (data?.progress?.status === 'running') {
+          pollTimer.current = setTimeout(load, POLL_INTERVAL_MS);
+        }
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    };
+
+    load();
+    return () => {
+      cancelled = true;
+      if (pollTimer.current) clearTimeout(pollTimer.current);
+    };
   }, [jobId]);
 
   if (loading) {
@@ -57,16 +79,47 @@ export function JobHistory() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [expandedJobId, setExpandedJobId] = useState<string | null>(null);
+  const pollTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const autoExpandedRef = useRef(false);
 
   useEffect(() => {
-    fetch('/api/cron/measurements/history')
-      .then((res) => res.json())
-      .then((data) => {
-        if (data.success) setJobs(data.jobs);
-        else throw new Error(data.error || 'Failed to load job history');
-      })
-      .catch((err) => setError(err instanceof Error ? err.message : 'Failed to load job history'))
-      .finally(() => setLoading(false));
+    let cancelled = false;
+
+    const load = async () => {
+      try {
+        const res = await fetch('/api/cron/measurements/history');
+        const data = await res.json();
+        if (cancelled) return;
+        if (!data.success) throw new Error(data.error || 'Failed to load job history');
+
+        setJobs(data.jobs);
+        setError(null);
+
+        // Open the in-progress run automatically the first time we see one,
+        // so watching "Test Run" work doesn't require hunting for it and
+        // clicking — but don't fight the user if they've since collapsed it.
+        const running = (data.jobs as JobHistoryEntry[]).find((j) => j.status === 'running');
+        if (running && !autoExpandedRef.current) {
+          setExpandedJobId(running.jobId);
+          autoExpandedRef.current = true;
+        }
+
+        // Keep polling only while something is actually in progress.
+        if ((data.jobs as JobHistoryEntry[]).some((j) => j.status === 'running')) {
+          pollTimer.current = setTimeout(load, POLL_INTERVAL_MS);
+        }
+      } catch (err) {
+        if (!cancelled) setError(err instanceof Error ? err.message : 'Failed to load job history');
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    };
+
+    load();
+    return () => {
+      cancelled = true;
+      if (pollTimer.current) clearTimeout(pollTimer.current);
+    };
   }, []);
 
   if (loading) {
@@ -95,6 +148,7 @@ export function JobHistory() {
       <div className="divide-y divide-border">
         {jobs.map((job) => {
           const isExpanded = expandedJobId === job.jobId;
+          const isRunning = job.status === 'running';
           return (
             <div key={job.jobId}>
               <button
@@ -110,8 +164,9 @@ export function JobHistory() {
                   <div className="text-[13px] font-semibold text-foreground">
                     {formatRelativeTime(job.startedAt)}
                   </div>
-                  <div className="text-[11px] text-faint">
-                    {job.status === 'running' ? 'Đang chạy' : `Hoàn tất trong ${formatDuration(job.startedAt, job.finishedAt)}`}
+                  <div className="flex items-center gap-1.5 text-[11px] text-faint">
+                    {isRunning && <Loader2 className="h-3 w-3 shrink-0 animate-spin text-brand" />}
+                    {isRunning ? 'Đang chạy' : `Hoàn tất trong ${formatDuration(job.startedAt, job.finishedAt)}`}
                   </div>
                 </div>
                 <div className="shrink-0 text-xs tabular-nums text-foreground font-semibold">
