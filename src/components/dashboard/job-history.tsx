@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { ChevronDown, ChevronRight, Check, X, CircleDashed, Loader2 } from 'lucide-react';
 import { formatRelativeTime, formatDateInTimezone } from '@/lib/utils/date';
-import { JobHistoryEntry, JobProgressSnapshot } from '@/lib/types/job-progress';
+import { JobHistoryEntry, JobProgressSnapshot, MAX_ITEM_RETRIES } from '@/lib/types/job-progress';
 
 const POLL_INTERVAL_MS = 4000;
 
@@ -63,6 +63,9 @@ function JobDetailRows({ jobId }: { jobId: string }) {
           {item.status === 'running' && <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-brand" />}
           {item.status === 'pending' && <CircleDashed className="h-3.5 w-3.5 shrink-0 text-faint" />}
           <span className="flex-1 truncate text-foreground">{item.product}</span>
+          {!!item.retryCount && item.status !== 'done' && (
+            <span className="shrink-0 text-faint">(thử lại {item.retryCount}/{MAX_ITEM_RETRIES})</span>
+          )}
           <span className="shrink-0 text-faint">{item.deviceType === 'DESKTOP' ? 'Desktop' : 'Mobile'}</span>
           {item.status === 'done' && item.score != null && (
             <span className="shrink-0 font-semibold tabular-nums text-foreground">{item.score}</span>

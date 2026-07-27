@@ -1,6 +1,6 @@
 import { PageSpeedService } from '@/lib/services/pagespeed';
 import { DeviceType } from '@prisma/client';
-import { JobHistoryEntry, JobProgressItem, JobProgressSnapshot } from '@/lib/types/job-progress';
+import { JobHistoryEntry, JobProgressItem, JobProgressSnapshot, MAX_ITEM_RETRIES } from '@/lib/types/job-progress';
 
 const JOB_HISTORY_KEY = 'job_history';
 const JOB_HISTORY_LIMIT = 30;
@@ -13,6 +13,12 @@ const CURRENT_JOB_KEY = 'current_job_id';
 // external cron and every ~20-40s by an open dashboard tab, so this only
 // fires for a genuinely dead run, not an ordinary gap between pings.
 const STALE_JOB_THRESHOLD_MS = 20 * 60 * 1000;
+
+// An item stuck at "running" longer than this has no process left updating
+// it (killed, crashed, or lost to an overlapping snapshot write) — treat it
+// as abandoned rather than letting it block the job from ever finishing.
+// Generous relative to a single measurement (a few seconds to ~1 minute).
+const STALE_ITEM_THRESHOLD_MS = 5 * 60 * 1000;
 
 function jobProgressKey(jobId: string): string {
   return `job_progress:${jobId}`;
@@ -153,6 +159,76 @@ async function finishJob(databaseService: any, snapshot: JobProgressSnapshot) {
   };
 }
 
+// Finds items stuck at "running" long enough that nothing is still driving
+// them — either requeues them as 'pending' for another attempt, or, once
+// they've exhausted their retries, settles them at 'failed' so they stop
+// silently blocking the job from ever being considered finished.
+function reclaimStaleRunningItems(snapshot: JobProgressSnapshot): boolean {
+  let changed = false;
+
+  for (const item of snapshot.items) {
+    if (item.status !== 'running') continue;
+
+    const lastUpdate = new Date(item.updatedAt ?? snapshot.updatedAt).getTime();
+    if (!Number.isNaN(lastUpdate) && Date.now() - lastUpdate <= STALE_ITEM_THRESHOLD_MS) continue;
+
+    const retryCount = (item.retryCount ?? 0) + 1;
+    item.retryCount = retryCount;
+    changed = true;
+
+    if (retryCount <= MAX_ITEM_RETRIES) {
+      item.status = 'pending';
+    } else {
+      item.status = 'failed';
+      item.error = 'Timed out — no update received';
+      snapshot.failedItems++;
+    }
+  }
+
+  return changed;
+}
+
+// Requeues 'failed' items that haven't yet used up their retry budget so
+// they get measured again instead of leaving the job to finish with
+// avoidable failures. Returns how many items were requeued.
+function requeueFailedItems(snapshot: JobProgressSnapshot): number {
+  let requeued = 0;
+
+  for (const item of snapshot.items) {
+    if (item.status !== 'failed') continue;
+    if ((item.retryCount ?? 0) >= MAX_ITEM_RETRIES) continue;
+
+    item.retryCount = (item.retryCount ?? 0) + 1;
+    item.error = undefined;
+    item.status = 'pending';
+    snapshot.failedItems--;
+    requeued++;
+  }
+
+  return requeued;
+}
+
+// Called wherever processNextChunk previously finished the job outright —
+// gives failed items one more chance (up to MAX_ITEM_RETRIES) before
+// actually closing it out.
+async function tryFinishJob(databaseService: any, snapshot: JobProgressSnapshot) {
+  const requeued = requeueFailedItems(snapshot);
+  if (requeued > 0) {
+    await saveProgress(databaseService, snapshot);
+    return {
+      success: true,
+      jobId: snapshot.jobId,
+      status: 'running' as const,
+      totalProducts: Math.round(snapshot.totalItems / 2),
+      completedItems: snapshot.completedItems,
+      failedItems: snapshot.failedItems,
+      totalItems: snapshot.totalItems,
+    };
+  }
+
+  return finishJob(databaseService, snapshot);
+}
+
 // Processes exactly one product's worth of measurements (both devices, if
 // both are still pending) and returns. Each invocation is short enough
 // (~1-2 PageSpeed calls) to always finish well inside a route's
@@ -161,10 +237,14 @@ async function finishJob(databaseService: any, snapshot: JobProgressSnapshot) {
 // one background task, which Vercel doesn't reliably let survive past the
 // triggering response anyway.
 async function processNextChunk(databaseService: any, snapshot: JobProgressSnapshot) {
+  if (reclaimStaleRunningItems(snapshot)) {
+    await saveProgress(databaseService, snapshot);
+  }
+
   const pendingItems = snapshot.items.filter((it) => it.status === 'pending');
 
   if (pendingItems.length === 0) {
-    return finishJob(databaseService, snapshot);
+    return tryFinishJob(databaseService, snapshot);
   }
 
   const nextProductId = pendingItems[0].productId;
@@ -194,6 +274,7 @@ async function processNextChunk(databaseService: any, snapshot: JobProgressSnaps
 
   for (const item of chunk) {
     item.status = 'running';
+    item.updatedAt = new Date().toISOString();
     await saveProgress(databaseService, snapshot);
 
     try {
@@ -236,7 +317,7 @@ async function processNextChunk(databaseService: any, snapshot: JobProgressSnaps
 
   const stillPending = snapshot.items.some((it) => it.status === 'pending');
   if (!stillPending) {
-    return finishJob(databaseService, snapshot);
+    return tryFinishJob(databaseService, snapshot);
   }
 
   return {
